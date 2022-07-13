@@ -30,19 +30,15 @@ import (
 )
 
 const (
-	readinessProbeDelay      = 60
-	readinessProbePeriod     = 20
-	livenessProbeDelay       = 30
-	probeCommand         string = "/opt/nifi/nifi-current/run/nifi.pid"
+	readinessProbeDelay         = 60
+	readinessProbePeriod        = 20
+	livenessProbeDelay          = 30
+	readinessHTTPPath    string = "nifi-api/system-diagnostics"
+	livenessProbeCommand string = "/opt/nifi/nifi-current/run/nifi.pid"
 )
 
 // reconcileStatefulSet reconciles the StatefulSet to deploy Nifi instances.
 func (r *Reconciler) reconcileStatefulSet(ctx context.Context, req ctrl.Request, nifi *bigdatav1alpha1.Nifi) error {
-	var (
-		nifiConsolePort       int
-		readinessProbeHandler corev1.ProbeHandler
-	)
-
 	ls := nifiutils.LabelsForNifi(nifi.Name)
 	ssUser := nifiUser
 	npam := nifiPropertiesAccessMode
@@ -56,31 +52,12 @@ func (r *Reconciler) reconcileStatefulSet(ctx context.Context, req ctrl.Request,
 		},
 	}
 
-	if nifiutils.IsConsoleProtocolHTTP(nifi) {
-		nifiConsolePort = nifiHTTPConsolePort
-		readinessProbeHandler = corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "nifi-api/system-diagnostics",
-				// Use a numeric value because the request send pod IP.
-				Port: intstr.FromInt(nifiConsolePort),
-			},
-		}
-	} else if nifiutils.IsConsoleProtocolHTTPS(nifi) {
-		nifiConsolePort = nifiHTTPSConsolePort
-		readinessProbeHandler = corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "nifi-api/system-diagnostics",
-				// Use a numeric value because the request send pod IP.
-				Port:   intstr.FromInt(nifiConsolePort),
-				Scheme: "HTTPS",
-			},
-		}
-	} else {
-		err := errors.New("Console Protocol Invalid")
-		log.Error(err, "")
-
+	nifiConsolePort, err := setNifiConsolePort(nifi)
+	if err != nil {
 		return err
 	}
+
+	readinessProbeHandler := setReadinessProbeHandler(nifiConsolePort)
 
 	ss := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -132,14 +109,14 @@ func (r *Reconciler) reconcileStatefulSet(ctx context.Context, req ctrl.Request,
 							InitialDelaySeconds: int32(livenessProbeDelay),
 							ProbeHandler: corev1.ProbeHandler{
 								Exec: &corev1.ExecAction{
-									Command: []string{"test", probeCommand},
+									Command: []string{"test", livenessProbeCommand},
 								},
 							},
 						},
 						ReadinessProbe: &corev1.Probe{
 							InitialDelaySeconds: int32(readinessProbeDelay),
 							PeriodSeconds:       int32(readinessProbePeriod),
-							ProbeHandler:        readinessProbeHandler,
+							ProbeHandler:        *readinessProbeHandler,
 						},
 						VolumeMounts: []corev1.VolumeMount{
 							{
@@ -205,4 +182,36 @@ func (r *Reconciler) reconcileStatefulSet(ctx context.Context, req ctrl.Request,
 	}
 
 	return r.Client.Create(ctx, ss)
+}
+
+// setNifiConsolePort return Nifi Console Port value.
+func setNifiConsolePort(nifi *bigdatav1alpha1.Nifi) (int, error) {
+	if nifiutils.IsConsoleProtocolHTTP(nifi) {
+		return nifiHTTPConsolePort, nil
+	} else if nifiutils.IsConsoleProtocolHTTPS(nifi) {
+		return nifiHTTPSConsolePort, nil
+	} else {
+		err := errors.New("Console Protocol Invalid")
+		log.Error(err, "")
+		return 0, err
+	}
+}
+
+// setReadinessProbeHandler define ProbeHandler for HTTP/HTTPS connection.
+func setReadinessProbeHandler(port int) *corev1.ProbeHandler {
+	if port == nifiHTTPSConsolePort {
+		return &corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path:   readinessHTTPPath,
+				Port:   intstr.FromInt(port),
+				Scheme: "HTTPS",
+			},
+		}
+	}
+	return &corev1.ProbeHandler{
+		HTTPGet: &corev1.HTTPGetAction{
+			Path: readinessHTTPPath,
+			Port: intstr.FromInt(port),
+		},
+	}
 }
